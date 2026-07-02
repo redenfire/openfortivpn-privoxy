@@ -1,0 +1,31 @@
+version: "3"
+services:
+  forti_vpn:
+    image: ghcr.io/redenfire/openfortivpn-privoxy
+    restart: unless-stopped
+    environment:
+      - VPN_USER=username
+      - VPN_PASS=password
+      - VPN_HOST=vpn.esempio.com
+      - VPN_PORT=443
+      - VPN_DOMAIN=dominio.interno.locale
+      - VPN_ROUTES=192.168.1.0/24 10.0.0.0/10
+      - PRIVOXY_PERMIT=192.168.1.0/24 10.0.0.0/10 localhost 127.0.0.1
+      # - VPN_CERT_HASH=sha256$xxxxxxxxxxxxxxxxxxxxxx
+      # - VPN_SET_DNS=0
+      # - VPN_PEERDNS=0
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    networks:
+      my_net:
+        ipv4_address: 192.168.x.x
+      app_net:
+        ipv4_address: 10.x.x.x
+
+
+networks:
+  my_net:
+    external: true
+  app_net:
+    external: true
