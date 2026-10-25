@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     openfortivpn \
     && rm -rf /var/lib/apt/lists/*
 
-RUN sed -i 's/^listen-address.*/listen-address 0.0.0.0:8118/' /etc/privoxy/config
+RUN sed -i '/^listen-address/d' /etc/privoxy/config \
+ && echo 'listen-address 0.0.0.0:8118' >> /etc/privoxy/config
 
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
