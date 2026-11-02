@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     ppp \
     privoxy \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /out/usr/ /usr/
@@ -39,12 +40,12 @@ COPY --from=builder /out/usr/ /usr/
 RUN sed -i '/^listen-address/d' /etc/privoxy/config \
  && echo 'listen-address 0.0.0.0:8118' >> /etc/privoxy/config
 
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 EXPOSE 8118
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD timeout 3 bash -c 'echo > /dev/tcp/127.0.0.1/8118'
 
-CMD ["/start.sh"]
+CMD ["/entrypoint.sh"]
