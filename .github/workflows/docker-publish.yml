@@ -9,15 +9,6 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Tag pubblicati a ogni build:
-  #   - cert            (tag "mobile" della nuova versione)
-  #   - cert-2026.11    (tag di versione)
-  # "latest" NON viene più aggiornato: resta fermo sull'immagine precedente
-  # alla modifica certificati, così è possibile fare rollback.
-  # Nota: entrambi i tag sono mutabili e vengono spostati a ogni build.
-  # Per un riferimento immutabile usa il digest sha256.
-  IMAGE_TAG: cert
-  IMAGE_VERSION_TAG: cert-2026.11
 
 jobs:
   build:
@@ -25,6 +16,19 @@ jobs:
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Base image: the plain env-driven version.
+          - variant: base
+            tag: latest
+            entrypoint: start.sh
+          # Certificate variant: downloads the gateway certificate and pins
+          # its SHA-256 automatically.
+          - variant: vpn_cert
+            tag: vpn_cert
+            entrypoint: entrypoint.sh
 
     steps:
       - uses: actions/checkout@v4
@@ -38,8 +42,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           push: true
-          # "latest" è volutamente escluso per non sovrascrivere la versione
-          # precedente e mantenerla disponibile per il rollback.
+          build-args: |
+            VPN_ENTRYPOINT=${{ matrix.entrypoint }}
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION_TAG }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.tag }}

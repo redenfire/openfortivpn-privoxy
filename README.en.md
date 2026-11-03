@@ -11,7 +11,9 @@ Docker container that connects a Fortinet VPN via openfortivpn and exposes an HT
 ```yaml
 services:
   vpn:
-    image: ghcr.io/redenfire/openfortivpn-privoxy:cert
+    # :vpn_cert downloads the certificate automatically; use :latest for the
+    # base version driven only by environment variables.
+    image: ghcr.io/redenfire/openfortivpn-privoxy:vpn_cert
     restart: unless-stopped
     environment:
       - VPN_USER=username
@@ -52,16 +54,16 @@ The available strategies are, in order of preference:
 2. **`VPN_CA_FILE`** — PEM bundle with a private/self-signed CA, mounted as a read-only volume. It is passed as `--ca-file=<file>`. The file must exist and be readable, otherwise the container exits with an error. Make sure it contains the chain required by your gateway (including intermediate CAs).
 3. **`VPN_TRUSTED_CERTS`** — pinning one or more SHA-256 digests (64 hex characters), separated by spaces or commas. Each digest is passed as `--trusted-cert=<digest>`. This is the recommended choice for self-signed gateways or HA/load-balanced setups with different certificates. The list is de-duplicated and validated before startup.
 4. **`VPN_CERT_HASH` (deprecated)** — backwards-compatible alias for a single digest. If set, it is added to the trusted list and a warning suggesting `VPN_TRUSTED_CERTS` is logged. For backwards compatibility the `sha256$` prefix is also accepted and stripped before passing the digest to openfortivpn.
-5. **`VPN_AUTO_TRUST_CERT` (opt-in)** — if `true`, performs one connection attempt with a short timeout (`VPN_AUTO_TRUST_TIMEOUT`, default `15` seconds) **without** trusted certs, looks in the output for the digest suggested by openfortivpn (`--trusted-cert <digest>`, `--trusted-cert=<digest>` or `trusted-cert = <digest>`) and reconnects adding it to the list. If it cannot find the digest, the container exits with an error.
+5. **`VPN_AUTO_TRUST_CERT`** — enabled by default in the `:vpn_cert` image. It downloads the certificate presented by the gateway with `openssl s_client`, computes its SHA-256 fingerprint and passes it as `--trusted-cert`. If the download fails it falls back to a short connection attempt (`VPN_AUTO_TRUST_TIMEOUT`, default `15` seconds) and looks for the digest suggested by openfortivpn (`--trusted-cert <digest>`, `--trusted-cert=<digest>` or `trusted-cert = <digest>`). Set `VPN_AUTO_TRUST_CERT=false` to require explicit configuration.
 6. **`VPN_INSECURE_SSL=true` (discouraged)** — passes `--insecure-ssl` and disables validation. It is never enabled by default and an explicit warning is logged.
 
-### Limitations of `VPN_AUTO_TRUST_CERT`
+### How `VPN_AUTO_TRUST_CERT` works
 
-- It performs a **failed connection attempt on every container start** (not on every reconnection). The probe uses `--set-routes=0 --set-dns=0` so it installs no routes and does not change DNS.
+- At startup it downloads the gateway certificate (`VPN_HOST:VPN_PORT`) and uses its SHA-256 fingerprint as `--trusted-cert`. The download happens once per container start, not on every reconnection.
+- If the download fails, it performs a connection attempt with `--set-routes=0 --set-dns=0` and extracts the digest from the output.
 - It adds **a single digest**: it does not handle multi-certificate/HA setups. In those cases use `VPN_TRUSTED_CERTS` with every digest.
 - It is skipped when explicit trusted certs are present, when `VPN_CA_FILE` is set, or when `VPN_INSECURE_SSL` is active.
-- If it cannot find a digest, it exits non-zero. This includes the case where the gateway uses a public CA and the probe connects without errors: in that situation `VPN_AUTO_TRUST_CERT` is unnecessary and must be disabled. The probe output is logged to make diagnosis easier.
-- It is intended as a safety net, not as a replacement for explicit pinning: a known, version-controlled digest is more predictable and secure.
+- Trusting the downloaded certificate is trust-on-first-use: a known, version-controlled digest (`VPN_TRUSTED_CERTS`) or a verified CA (`VPN_CA_FILE`) is more predictable. This is why the base `:latest` image does not download anything.
 
 ### TLS errors `tlsv1 alert internal error`
 
@@ -76,16 +78,18 @@ The value is passed as `--cipher-list "<value>"` without modifying the image. No
 
 ### Example scenarios
 
-The [`docker-compose.yml`](docker-compose.yml) file contains three services with separate profiles:
+The [`docker-compose.yaml`](docker-compose.yaml) file contains services with separate profiles:
 
-| Scenario | Profile | Key variables |
-|----------|---------|---------------|
-| Public CA | `public-ca` | no certificate variable |
-| Custom CA | `custom-ca` | `VPN_CA_FILE=/certs/ca.pem` + PEM volume |
-| Multiple trusted certs | `trusted-certs` | `VPN_TRUSTED_CERTS=digest1,digest2` |
+| Scenario | Profile | Image | Key variables |
+|----------|---------|-------|---------------|
+| Base (env) | `base` | `:latest` | optional `VPN_CERT_HASH` |
+| Automatic certificate | `auto` | `:vpn_cert` | no certificate variable |
+| Custom CA | `custom-ca` | `:vpn_cert` | `VPN_CA_FILE=/certs/ca.pem` + PEM volume |
+| Multiple trusted certs | `trusted-certs` | `:vpn_cert` | `VPN_TRUSTED_CERTS=digest1,digest2` |
 
 ```bash
-docker compose --profile public-ca up
+docker compose --profile base up
+docker compose --profile auto up
 docker compose --profile custom-ca up
 docker compose --profile trusted-certs up
 ```
@@ -105,8 +109,8 @@ docker compose --profile trusted-certs up
 | `VPN_CA_FILE` | — | PEM CA bundle passed as `--ca-file` (optional) |
 | `VPN_TRUSTED_CERTS` | — | One or more SHA-256 digests (64 hex), separated by spaces or commas; each becomes a `--trusted-cert` (optional) |
 | `VPN_CERT_HASH` | — | **Deprecated**: alias for a single trusted cert; use `VPN_TRUSTED_CERTS` |
-| `VPN_AUTO_TRUST_CERT` | `false` | If `true`, extracts the digest from the gateway error and reconnects with `--trusted-cert` |
-| `VPN_AUTO_TRUST_TIMEOUT` | `15` | Timeout in seconds for the initial probe used by `VPN_AUTO_TRUST_CERT` |
+| `VPN_AUTO_TRUST_CERT` | `true` (`:vpn_cert` only) | Downloads the gateway certificate, computes its SHA-256 and uses it as `--trusted-cert`; falls back to the openfortivpn message on failure. Set `false` to require explicit configuration |
+| `VPN_AUTO_TRUST_TIMEOUT` | `15` | Timeout in seconds for the download/probe used by `VPN_AUTO_TRUST_CERT` |
 | `VPN_CIPHER_LIST` | — | Value for `--cipher-list` (e.g. `DEFAULT@SECLEVEL=1`) |
 | `VPN_INSECURE_SSL` | `false` | If `true`, passes `--insecure-ssl`. Disables TLS validation: discouraged |
 | `VPN_SET_DNS` | — | `--set-dns` flag for openfortivpn (optional; in Docker consider `0` if `/etc/resolv.conf` is read-only) |
@@ -129,44 +133,28 @@ The image builds openfortivpn from the latest upstream release (multi-stage buil
 
 ### Image tags
 
-The GitHub workflow publishes the new version with two tags:
+The GitHub workflow publishes two variants of the same image:
 
 | Tag | Purpose |
 |-----|---------|
-| `:cert` | moving tag for the new version |
-| `:cert-2026.11` | version tag for the new release |
-
-**`:latest` is no longer updated**: it stays frozen on the image from before the certificate change, so it remains available for rollback.
+| `:latest` | base version, driven by environment variables (certificate handled manually with `VPN_CERT_HASH`) |
+| `:vpn_cert` | automatic certificate handling: downloads the gateway certificate and trusts its SHA-256 |
 
 ```yaml
-# new version (moving tag)
-image: ghcr.io/redenfire/openfortivpn-privoxy:cert
-
-# new version (release tag)
-image: ghcr.io/redenfire/openfortivpn-privoxy:cert-2026.11
-
-# rollback to the previous version
+# base version (env)
 image: ghcr.io/redenfire/openfortivpn-privoxy:latest
+
+# automatic certificate version
+image: ghcr.io/redenfire/openfortivpn-privoxy:vpn_cert
 ```
 
-To make the old image reference explicit and permanent, save it as `:legacy` before the new pipeline runs for the first time:
+Local build of both variants (the same Dockerfile selects the entrypoint):
 
 ```bash
-docker pull ghcr.io/redenfire/openfortivpn-privoxy:latest
-docker tag ghcr.io/redenfire/openfortivpn-privoxy:latest \
-  ghcr.io/redenfire/openfortivpn-privoxy:legacy
-docker push ghcr.io/redenfire/openfortivpn-privoxy:legacy
-```
-
-For a local build with both new tags:
-
-```bash
-docker build \
-  -t ghcr.io/redenfire/openfortivpn-privoxy:cert \
-  -t ghcr.io/redenfire/openfortivpn-privoxy:cert-2026.11 .
-
-docker push ghcr.io/redenfire/openfortivpn-privoxy:cert
-docker push ghcr.io/redenfire/openfortivpn-privoxy:cert-2026.11
+docker build --build-arg VPN_ENTRYPOINT=start.sh \
+  -t ghcr.io/redenfire/openfortivpn-privoxy:latest .
+docker build --build-arg VPN_ENTRYPOINT=entrypoint.sh \
+  -t ghcr.io/redenfire/openfortivpn-privoxy:vpn_cert .
 ```
 
 Both tags are **mutable**: they move on every pipeline build (including the daily scheduled one). If you need a truly immutable reference, pin the digest:

@@ -24,12 +24,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 FROM ubuntu:22.04
 
+# Selects the entrypoint, so the same Dockerfile builds both image variants:
+#   start.sh       -> base image  (:latest), the plain env-driven version
+#   entrypoint.sh  -> cert image  (:vpn_cert), automatic certificate handling
+ARG VPN_ENTRYPOINT=start.sh
+
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     iproute2 \
     libssl3 \
+    openssl \
     ppp \
     privoxy \
     && update-ca-certificates \
@@ -40,7 +46,7 @@ COPY --from=builder /out/usr/ /usr/
 RUN sed -i '/^listen-address/d' /etc/privoxy/config \
  && echo 'listen-address 0.0.0.0:8118' >> /etc/privoxy/config
 
-COPY entrypoint.sh /entrypoint.sh
+COPY ${VPN_ENTRYPOINT} /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 EXPOSE 8118

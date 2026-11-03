@@ -107,6 +107,39 @@ has_certificate_error() {
     grep -Eqi 'certificate validation failed|--trusted-cert|trusted-cert[[:space:]]*=' "$1"
 }
 
+# Download the certificate presented by the gateway and return its SHA-256
+# fingerprint as lower-case hex, the format expected by --trusted-cert.
+# openfortivpn compares the digest of the DER-encoded leaf certificate, which
+# is exactly what "openssl x509 -fingerprint -sha256" computes.
+download_gateway_cert_digest() {
+    _dl_host=$1
+    _dl_port=$2
+
+    command -v openssl >/dev/null 2>&1 || return 1
+
+    _dl_pem=$(mktemp /tmp/openfortivpn-cert.XXXXXX 2>/dev/null) || \
+        _dl_pem="/tmp/openfortivpn-cert.$$"
+
+    if ! timeout "$VPN_AUTO_TRUST_TIMEOUT" \
+        openssl s_client -connect "${_dl_host}:${_dl_port}" -servername "$_dl_host" \
+            -showcerts </dev/null 2>/dev/null \
+        | openssl x509 -outform PEM > "$_dl_pem" 2>/dev/null; then
+        rm -f "$_dl_pem"
+        return 1
+    fi
+    [ -s "$_dl_pem" ] || { rm -f "$_dl_pem"; return 1; }
+
+    _dl_digest=$(openssl x509 -in "$_dl_pem" -noout -fingerprint -sha256 2>/dev/null \
+        | sed 's/^.*=//' | tr -d ':' | tr 'A-F' 'a-f')
+    rm -f "$_dl_pem"
+
+    case "$_dl_digest" in
+        ''|*[!0-9a-f]*) return 1 ;;
+    esac
+
+    printf '%s' "$_dl_digest"
+}
+
 dns_resolves() {
     if command -v getent >/dev/null 2>&1; then
         getent hosts "$1" >/dev/null 2>&1
@@ -139,7 +172,10 @@ VPN_CHECK_INTERVAL=${VPN_CHECK_INTERVAL:-20}
 VPN_CONNECT_TIMEOUT=${VPN_CONNECT_TIMEOUT:-60}
 VPN_FAIL_THRESHOLD=${VPN_FAIL_THRESHOLD:-3}
 VPN_AUTO_TRUST_TIMEOUT=${VPN_AUTO_TRUST_TIMEOUT:-15}
-VPN_AUTO_TRUST_CERT=${VPN_AUTO_TRUST_CERT:-false}
+# On the vpn_cert variant the certificate is fetched automatically, so
+# auto-trust is on by default. Set VPN_AUTO_TRUST_CERT=false to require an
+# explicit VPN_CA_FILE / VPN_TRUSTED_CERTS / VPN_CERT_HASH instead.
+VPN_AUTO_TRUST_CERT=${VPN_AUTO_TRUST_CERT:-true}
 VPN_INSECURE_SSL=${VPN_INSECURE_SSL:-false}
 
 case "$VPN_PORT" in
@@ -226,39 +262,49 @@ if [ "$AUTO_TRUST" -eq 1 ]; then
         command -v timeout >/dev/null 2>&1 || \
             die "VPN_AUTO_TRUST_CERT=true richiede il comando 'timeout'."
 
-        log "VPN_AUTO_TRUST_CERT=true: tentativo di connessione senza trusted-cert (timeout ${VPN_AUTO_TRUST_TIMEOUT}s) per estrarre il digest."
-        _probe_log=$(mktemp /tmp/openfortivpn-probe.XXXXXX 2>/dev/null) || \
-            _probe_log="/tmp/openfortivpn-probe.$$"
-        : > "$_probe_log"
-
-        # The probe must not install routes or change DNS: it only needs to
-        # reach the certificate validation stage.
-        timeout "$VPN_AUTO_TRUST_TIMEOUT" openfortivpn "$@" \
-            --set-routes=0 --set-dns=0 > "$_probe_log" 2>&1
-        _probe_rc=$?
-
-        _detected_digest=$(extract_trusted_digest "$_probe_log")
+        log "VPN_AUTO_TRUST_CERT=true: scarico il certificato da ${VPN_HOST}:${VPN_PORT} (timeout ${VPN_AUTO_TRUST_TIMEOUT}s)."
+        _detected_digest=$(download_gateway_cert_digest "$VPN_HOST" "$VPN_PORT")
 
         if [ -n "$_detected_digest" ]; then
-            log "VPN_AUTO_TRUST_CERT: digest estratto dal gateway: $_detected_digest"
+            log "VPN_AUTO_TRUST_CERT: certificato scaricato, digest SHA-256: $_detected_digest"
             add_trusted_cert "$_detected_digest"
         else
-            if has_certificate_error "$_probe_log"; then
-                err "VPN_AUTO_TRUST_CERT: il gateway ha rifiutato il certificato ma non è stato possibile estrarre un digest valido."
-            else
-                err "VPN_AUTO_TRUST_CERT: nessun digest --trusted-cert trovato nell'output del tentativo (exit=$_probe_rc)."
-                err "Se il gateway usa una CA pubblica o VPN_CA_FILE, disabilita VPN_AUTO_TRUST_CERT."
-            fi
-            err "Output del tentativo (la password non viene mai stampata):"
-            sed 's/^/[vpn-config] probe: /' "$_probe_log" >&2
-            rm -f "$_probe_log"
-            exit 1
-        fi
+            warn "Download del certificato non riuscito, provo a estrarre il digest dalla connessione openfortivpn."
 
-        rm -f "$_probe_log"
-        # If the probe managed to bring the tunnel up, clean it up before the
-        # real connection starts.
-        ip link del ppp0 2>/dev/null || true
+            log "VPN_AUTO_TRUST_CERT=true: tentativo di connessione senza trusted-cert (timeout ${VPN_AUTO_TRUST_TIMEOUT}s) per estrarre il digest."
+            _probe_log=$(mktemp /tmp/openfortivpn-probe.XXXXXX 2>/dev/null) || \
+                _probe_log="/tmp/openfortivpn-probe.$$"
+            : > "$_probe_log"
+
+            # The probe must not install routes or change DNS: it only needs to
+            # reach the certificate validation stage.
+            timeout "$VPN_AUTO_TRUST_TIMEOUT" openfortivpn "$@" \
+                --set-routes=0 --set-dns=0 > "$_probe_log" 2>&1
+            _probe_rc=$?
+
+            _detected_digest=$(extract_trusted_digest "$_probe_log")
+
+            if [ -n "$_detected_digest" ]; then
+                log "VPN_AUTO_TRUST_CERT: digest estratto dall'output di openfortivpn: $_detected_digest"
+                add_trusted_cert "$_detected_digest"
+            else
+                if has_certificate_error "$_probe_log"; then
+                    err "VPN_AUTO_TRUST_CERT: il gateway ha rifiutato il certificato ma non è stato possibile estrarre un digest valido."
+                else
+                    err "VPN_AUTO_TRUST_CERT: nessun digest --trusted-cert trovato nell'output del tentativo (exit=$_probe_rc)."
+                    err "Se il gateway usa una CA pubblica o VPN_CA_FILE, disabilita VPN_AUTO_TRUST_CERT."
+                fi
+                err "Output del tentativo (la password non viene mai stampata):"
+                sed 's/^/[vpn-config] probe: /' "$_probe_log" >&2
+                rm -f "$_probe_log"
+                exit 1
+            fi
+
+            rm -f "$_probe_log"
+            # If the probe managed to bring the tunnel up, clean it up before
+            # the real connection starts.
+            ip link del ppp0 2>/dev/null || true
+        fi
     fi
 fi
 

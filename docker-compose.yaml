@@ -1,19 +1,16 @@
-# Example Compose file with the three certificate-validation scenarios.
+# Example Compose file for both image variants.
 #
 # Only one service at a time is intended to run, because they all bind port
 # 8118. Choose a profile:
 #
-#   docker compose --profile public-ca up
-#   docker compose --profile custom-ca up
-#   docker compose --profile trusted-certs up
+#   docker compose --profile base up            # env-only image (:latest)
+#   docker compose --profile auto up            # :vpn_cert, cert downloaded automatically
+#   docker compose --profile custom-ca up       # :vpn_cert, private CA
+#   docker compose --profile trusted-certs up   # :vpn_cert, explicit SHA-256 pinning
 #
 # Replace the credentials, host, domain and digests with real values.
 
-x-vpn-base: &vpn-base
-  # New certificate-aware image. You can also use :cert-2026.11 for the
-  # versioned tag. Use :latest (or :legacy) for rollback to the image built
-  # before this change.
-  image: ghcr.io/redenfire/openfortivpn-privoxy:cert
+x-vpn-common: &vpn-common
   restart: unless-stopped
   cap_add:
     - NET_ADMIN
@@ -31,36 +28,46 @@ x-vpn-env: &vpn-env
   PRIVOXY_PERMIT: "192.168.1.0/24 10.0.0.0/8 localhost 127.0.0.1"
 
 services:
-  # Scenario 1: gateway with a certificate issued by a public CA (Actalis,
-  # Let's Encrypt, DigiCert, ...). The system trust store is enough: do not set
-  # any certificate variable.
-  vpn-public-ca:
-    <<: *vpn-base
-    profiles: ["public-ca"]
+  # Base image (:latest): the plain env-driven version. Certificates must be
+  # handled manually with VPN_CERT_HASH.
+  vpn-base:
+    <<: *vpn-common
+    profiles: ["base"]
+    image: ghcr.io/redenfire/openfortivpn-privoxy:latest
     environment:
       <<: *vpn-env
-      # Optional workarounds, normally not needed:
-      # VPN_CIPHER_LIST: "DEFAULT@SECLEVEL=1"
-      # VPN_AUTO_TRUST_CERT: "true"
+      # VPN_CERT_HASH: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 
-  # Scenario 2: private/self-signed CA. Mount the PEM file read-only and point
+  # Certificate image (:vpn_cert): the gateway certificate is downloaded and
+  # its SHA-256 is trusted automatically. No certificate variables needed.
+  vpn-auto-cert:
+    <<: *vpn-common
+    profiles: ["auto"]
+    image: ghcr.io/redenfire/openfortivpn-privoxy:vpn_cert
+    environment:
+      <<: *vpn-env
+      # Disable the automatic download if you prefer strict validation:
+      # VPN_AUTO_TRUST_CERT: "false"
+
+  # Private/self-signed CA: mount the PEM file read-only and point
   # VPN_CA_FILE at it. Include the full chain needed by your gateway
   # (intermediate CAs too).
   vpn-custom-ca:
-    <<: *vpn-base
+    <<: *vpn-common
     profiles: ["custom-ca"]
+    image: ghcr.io/redenfire/openfortivpn-privoxy:vpn_cert
     environment:
       <<: *vpn-env
       VPN_CA_FILE: /certs/ca.pem
     volumes:
       - ./certs/ca.pem:/certs/ca.pem:ro
 
-  # Scenario 3: certificate pinning. One or more SHA-256 digests (64 hex
-  # characters each), separated by spaces or commas. Useful for self-signed
-  # gateways and HA/load-balanced setups with different certificates.
+  # Certificate pinning: one or more SHA-256 digests (64 hex characters each),
+  # separated by spaces or commas.
   vpn-trusted-certs:
-    <<: *vpn-base
+    <<: *vpn-common
     profiles: ["trusted-certs"]
+    image: ghcr.io/redenfire/openfortivpn-privoxy:vpn_cert
     environment:
       <<: *vpn-env
       VPN_TRUSTED_CERTS: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef,fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
