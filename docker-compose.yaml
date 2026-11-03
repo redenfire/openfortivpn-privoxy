@@ -26,6 +26,10 @@ x-vpn-env: &vpn-env
   VPN_PORT: "443"
   VPN_DOMAIN: internal.domain.local
   PRIVOXY_PERMIT: "192.168.1.0/24 10.0.0.0/8 localhost 127.0.0.1"
+  # Networks that must stay reachable through the pre-VPN gateway (typically
+  # the LAN where proxy clients live). Needed when openfortivpn takes over the
+  # default route and the container is behind Docker NAT.
+  # VPN_LOCAL_NETS: "192.168.1.0/24"
 
 services:
   # Base image (:latest): the plain env-driven version. Certificates must be

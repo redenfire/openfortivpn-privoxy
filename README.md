@@ -115,11 +115,38 @@ docker compose --profile trusted-certs up
 | `VPN_INSECURE_SSL` | `false` | Se `true`, passa `--insecure-ssl`. Disabilita la validazione TLS: sconsigliato |
 | `VPN_SET_DNS` | — | Flag `--set-dns` per openfortivpn (opzionale; in Docker valuta `0` se `/etc/resolv.conf` è read-only) |
 | `VPN_PEERDNS` | — | Flag `--pppd-use-peerdns` per openfortivpn (opzionale) |
+| `VPN_LOCAL_NETS` | — | Reti da mantenere instradate via gateway pre-VPN (es. la LAN dei client), separate da spazio o virgola. Ogni CIDR diventa `ip route replace <rete> via <gw-pre-vpn>` |
 | `VPN_CHECK_INTERVAL` | `20` | Secondi tra i controlli dello stato VPN |
 | `VPN_CONNECT_TIMEOUT` | `60` | Secondi di attesa perché `ppp0` ottenga un indirizzo IPv4 |
 | `VPN_FAIL_THRESHOLD` | `3` | Controlli consecutivi falliti prima di riavviare la VPN |
 
 Le route verso le reti VPN vengono installate direttamente da openfortivpn: non serve configurarle a mano.
+
+### Client della LAN che non raggiungono il proxy
+
+openfortivpn sostituisce la default route del container con `ppp0`. Se i client del proxy vivono in una rete che il container non ha direttamente connessa (es. la LAN `192.168.1.0/24` mentre il container sta su bridge Docker `192.168.96.0/20`), le risposte di Privoxy verso quei client vengono inviate nel tunnel e si perdono: il SYN arriva, ma il SYN-ACK no, e da fuori sembra che il proxy sia spento.
+
+All'avvio lo script salva il gateway pre-VPN (prima che `ppp0` diventi la default) e, per ogni rete in `VPN_LOCAL_NETS`, esegue:
+
+```bash
+ip route replace <rete> via <gateway-pre-vpn> dev <interfaccia>
+```
+
+Esempio:
+
+```yaml
+environment:
+  - VPN_LOCAL_NETS=192.168.1.0/24
+```
+
+Puoi verificare con:
+
+```bash
+docker exec <container> ip route
+# deve comparire: 192.168.1.0/24 via <gw> dev eth0
+```
+
+Le reti direttamente connesse al container (evidenziate da `dev ethX` in `ip route`) non vanno aggiunte.
 
 ---
 

@@ -16,6 +16,52 @@ VPN_CONNECT_TIMEOUT=${VPN_CONNECT_TIMEOUT:-60}
 # Quanti controlli consecutivi falliti prima di riavviare la VPN
 VPN_FAIL_THRESHOLD=${VPN_FAIL_THRESHOLD:-3}
 
+# Reti che devono restare raggiungibili tramite il gateway pre-VPN (tipicamente
+# la LAN dei client del proxy). openfortivpn sostituisce la default route con
+# ppp0, quindi senza queste route le risposte ai client LAN finiscono nel tunnel.
+# CIDR separati da spazio o virgola.
+VPN_LOCAL_NETS=${VPN_LOCAL_NETS:-}
+
+# Gateway e device della default route precedente all'avvio della VPN.
+ORIG_DEFAULT_GW=""
+ORIG_DEFAULT_DEV=""
+
+capture_default_route() {
+    _dr=$(ip route show default 2>/dev/null | head -n 1)
+    [ -n "$_dr" ] || return 1
+    ORIG_DEFAULT_DEV=$(printf '%s\n' "$_dr" | \
+        awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+    ORIG_DEFAULT_GW=$(printf '%s\n' "$_dr" | \
+        awk '{for (i=1;i<=NF;i++) if ($i=="via") {print $(i+1); exit}}')
+    [ -n "$ORIG_DEFAULT_DEV" ]
+}
+
+apply_local_routes() {
+    [ -n "$VPN_LOCAL_NETS" ] || return 0
+    if [ -z "$ORIG_DEFAULT_DEV" ]; then
+        echo "$(date): WARN - VPN_LOCAL_NETS impostato ma default route pre-VPN non rilevata."
+        return 0
+    fi
+    for _local_net in $(printf '%s' "$VPN_LOCAL_NETS" | tr ',' ' '); do
+        if [ -n "$ORIG_DEFAULT_GW" ]; then
+            if ip route replace "$_local_net" via "$ORIG_DEFAULT_GW" \
+                dev "$ORIG_DEFAULT_DEV" 2>/dev/null; then
+                echo "$(date): route locale $_local_net via $ORIG_DEFAULT_GW dev $ORIG_DEFAULT_DEV."
+            else
+                echo "$(date): WARN - route locale $_local_net non aggiunta."
+            fi
+        elif ip route replace "$_local_net" dev "$ORIG_DEFAULT_DEV" 2>/dev/null; then
+            echo "$(date): route locale $_local_net dev $ORIG_DEFAULT_DEV."
+        else
+            echo "$(date): WARN - route locale $_local_net non aggiunta."
+        fi
+    done
+}
+
+capture_default_route || \
+    echo "$(date): WARN - default route pre-VPN non rilevata: VPN_LOCAL_NETS non verra' applicato."
+apply_local_routes
+
 # --- 1. AVVIO PRIVOXY ---
 for net in $PRIVOXY_PERMIT; do
     grep -qF "permit-access  $net" /etc/privoxy/config || \
@@ -61,6 +107,7 @@ while true; do
 
     if [ "$ready" -eq 1 ]; then
         echo "$(date): VPN attiva (ppp0 con indirizzo IPv4)."
+        apply_local_routes
     else
         echo "$(date): VPN non attiva dopo ${VPN_CONNECT_TIMEOUT}s."
     fi

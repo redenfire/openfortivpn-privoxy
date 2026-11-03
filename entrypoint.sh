@@ -151,6 +151,42 @@ dns_resolves() {
     fi
 }
 
+# Capture the default route before openfortivpn replaces it with ppp0. The
+# gateway/device are used by apply_local_routes to keep the LAN reachable.
+ORIG_DEFAULT_GW=""
+ORIG_DEFAULT_DEV=""
+capture_default_route() {
+    _dr=$(ip route show default 2>/dev/null | head -n 1)
+    [ -n "$_dr" ] || return 1
+    ORIG_DEFAULT_DEV=$(printf '%s\n' "$_dr" | \
+        awk '{for (i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+    ORIG_DEFAULT_GW=$(printf '%s\n' "$_dr" | \
+        awk '{for (i=1;i<=NF;i++) if ($i=="via") {print $(i+1); exit}}')
+    [ -n "$ORIG_DEFAULT_DEV" ]
+}
+
+apply_local_routes() {
+    [ -n "$VPN_LOCAL_NETS" ] || return 0
+    if [ -z "$ORIG_DEFAULT_DEV" ]; then
+        warn "VPN_LOCAL_NETS impostato ma la default route pre-VPN non è stata rilevata."
+        return 0
+    fi
+    for _local_net in $(printf '%s' "$VPN_LOCAL_NETS" | tr ',' ' '); do
+        if [ -n "$ORIG_DEFAULT_GW" ]; then
+            if ip route replace "$_local_net" via "$ORIG_DEFAULT_GW" \
+                dev "$ORIG_DEFAULT_DEV" 2>/dev/null; then
+                log "Route locale $_local_net via $ORIG_DEFAULT_GW dev $ORIG_DEFAULT_DEV."
+            else
+                warn "Route locale $_local_net non aggiunta (via $ORIG_DEFAULT_GW dev $ORIG_DEFAULT_DEV)."
+            fi
+        elif ip route replace "$_local_net" dev "$ORIG_DEFAULT_DEV" 2>/dev/null; then
+            log "Route locale $_local_net dev $ORIG_DEFAULT_DEV."
+        else
+            warn "Route locale $_local_net non aggiunta (dev $ORIG_DEFAULT_DEV)."
+        fi
+    done
+}
+
 # ---------------------------------------------------------------------------
 # Required configuration
 # ---------------------------------------------------------------------------
@@ -172,6 +208,11 @@ VPN_CHECK_INTERVAL=${VPN_CHECK_INTERVAL:-20}
 VPN_CONNECT_TIMEOUT=${VPN_CONNECT_TIMEOUT:-60}
 VPN_FAIL_THRESHOLD=${VPN_FAIL_THRESHOLD:-3}
 VPN_AUTO_TRUST_TIMEOUT=${VPN_AUTO_TRUST_TIMEOUT:-15}
+# Networks that must stay reachable through the pre-VPN gateway (typically the
+# LAN the proxy clients live on). openfortivpn replaces the default route with
+# ppp0, so without these routes the replies to LAN clients are sent into the
+# tunnel. Space or comma separated CIDRs.
+VPN_LOCAL_NETS=${VPN_LOCAL_NETS:-}
 # On the vpn_cert variant the certificate is fetched automatically, so
 # auto-trust is on by default. Set VPN_AUTO_TRUST_CERT=false to require an
 # explicit VPN_CA_FILE / VPN_TRUSTED_CERTS / VPN_CERT_HASH instead.
@@ -195,6 +236,12 @@ fi
 if ! INSECURE_SSL=$(normalize_bool "$VPN_INSECURE_SSL"); then
     die "VPN_INSECURE_SSL deve essere true o false (valore: '$VPN_INSECURE_SSL')"
 fi
+
+# Remember the pre-VPN default route and install the local routes right away,
+# so they survive the default route switch to ppp0.
+capture_default_route || \
+    warn "Default route pre-VPN non rilevata: VPN_LOCAL_NETS non verrà applicato."
+apply_local_routes
 
 # ---------------------------------------------------------------------------
 # Certificate configuration
@@ -380,6 +427,8 @@ while true; do
 
     if [ "$_ready" -eq 1 ]; then
         log "VPN attiva (ppp0 con indirizzo IPv4)."
+        # Re-assert after openfortivpn (re)installs its routes.
+        apply_local_routes
     else
         log "VPN non attiva dopo ${VPN_CONNECT_TIMEOUT}s."
     fi
