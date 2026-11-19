@@ -4,14 +4,17 @@ ARG OPENFORTIVPN_VERSION=1.24.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
-    build-essential \
-    autoconf \
-    automake \
-    pkg-config \
-    libssl-dev \
+RUN set -e; \
+    n=0; \
+    while [ "$n" -lt 5 ]; do \
+      if apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+         && apt-get install -y --no-install-recommends \
+              ca-certificates curl build-essential autoconf automake pkg-config libssl-dev; \
+      then break; \
+      fi; \
+      n=$((n+1)); echo "apt install failed (attempt $n/5), retrying in 10s..."; sleep 10; \
+    done; \
+    test "$n" -lt 5 \
     && curl -fsSL "https://github.com/adrienverge/openfortivpn/archive/refs/tags/v${OPENFORTIVPN_VERSION}.tar.gz" -o /tmp/openfortivpn.tar.gz \
     && tar -xzf /tmp/openfortivpn.tar.gz -C /tmp \
     && cd "/tmp/openfortivpn-${OPENFORTIVPN_VERSION}" \
@@ -31,13 +34,17 @@ ARG VPN_ENTRYPOINT=start.sh
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    iproute2 \
-    libssl3 \
-    openssl \
-    ppp \
-    privoxy \
+RUN set -e; \
+    n=0; \
+    while [ "$n" -lt 5 ]; do \
+      if apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 \
+         && apt-get install -y --no-install-recommends \
+              ca-certificates iproute2 libssl3 openssl ppp privoxy; \
+      then break; \
+      fi; \
+      n=$((n+1)); echo "apt install failed (attempt $n/5), retrying in 10s..."; sleep 10; \
+    done; \
+    test "$n" -lt 5 \
     && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
